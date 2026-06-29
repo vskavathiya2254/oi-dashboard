@@ -9,7 +9,7 @@ import json
 import math
 import requests   # ← REQUIRED
 import gspread
-from datetime import datetime, date
+import datetime
 from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
