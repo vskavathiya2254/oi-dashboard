@@ -61,21 +61,28 @@ def time_to_expiry(expiry_str):
 #  DHAN API — FETCH OPTIONS CHAIN
 # ─────────────────────────────────────────────
 def fetch_options_chain():
-    url = "https://api.dhan.co/v2/optionChain"
+    url = "https://api.dhan.co/v2/optionchain"
+
     headers = {
         "access-token": DHAN_ACCESS_TOKEN,
-        "client-id":    DHAN_CLIENT_ID,
+        "client-id": DHAN_CLIENT_ID,
         "Content-Type": "application/json",
     }
-    payload = {
-        "UnderlyingScrip": 13,           # 13 = NIFTY
-        "UnderlyingSeg":   "IDX_I",
-        "Expiry":          CONFIG["EXPIRY"],
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
 
+    payload = {
+        "UnderlyingScrip": 13,
+        "UnderlyingSeg": "IDX_I",
+        "Expiry": CONFIG["EXPIRY"],
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+
+    print("Status Code:", resp.status_code)
+    print("Response:", resp.text)
+
+    resp.raise_for_status()
+
+    return resp.json()
 def fetch_spot_price():
     url = "https://api.dhan.co/v2/marketfeed/ltp"
     headers = {
