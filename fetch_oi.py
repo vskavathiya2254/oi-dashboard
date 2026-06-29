@@ -6,23 +6,18 @@ Fetches CE/PE OI, IV, Vega from Dhan API → pushes to Google Sheets
 
 import os
 import json
-import math
-import requests
-import gspread
-from datetime import datetime, date
 from google.oauth2.service_account import Credentials
+import gspread
 
 # ─────────────────────────────────────────────
-#  YOUR CREDENTIALS (set these as GitHub Secrets)
+#  YOUR CREDENTIALS (GitHub Secrets)
 # ─────────────────────────────────────────────
-DHAN_CLIENT_ID    = os.environ.get("1104324276", "")
-DHAN_ACCESS_TOKEN = os.environ.get("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzgyNzUyMjU0LCJpYXQiOjE3ODI2NjU4NTQsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA0MzI0Mjc2In0.9FXuQpgPabzStGPPq75f0kHs0V5jQvBXJTRRFNLG55v6cHyD7zPl7zQ47qoyYb-_r5SdDZDF5VJNsEerfZftEg", "")
-GOOGLE_SHEET_ID   = os.environ.get("11VEfOjNHngLH3d0rV1n7ThPGH3lwJGs4qY7bftpn31g", "")
-GOOGLE_CREDS_JSON = os.environ.get("{"type": "service_account","project_id": "oi-project-500817","private_key_id": "cd57efbb5bc986088bb6ef0088655839c59ee3b6","private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC9R1MWInPWM7WF\n+I/vOILvHy+XJlMTuWAhjH2CmvxfzoZiCG9Mio66ZzfmzBpWa9rIc14pOBBqjItO\nfBoghO0lofzziVFpAfmI19AX75h93SRY97KitwVMs9CqbYPi7DETs2acmmibywBu\njpR17OcQznEP3U9W/YuxBIr+x5rgfRGuypxXUflPSNN7F712wXj4gGWVIP7XKa0J\n+XqV4PkcCwfjt9zNIg2ONyLiBXF9pa9q2bty/hYKFTvhEmngersnKjZ4Kz8WYbUM\nwyn3P6sXdKNgM+Ex7/4BB2CRX2iAKs57p8n9JSBfy2WvPTISQLNP4vtHLyWS7kN3\nbRDvCQbzAgMBAAECggEAG4gOYSqDEuXT7OK/fO+0C+LLYf75wpAKQuxT1/WB6Xr5\njQo7tjRz7Pp/5Rr3EcRVFHxuISy90TcUOZxPkz9X3KDNUayS94/eo2BQ18p1XIlt\ndLYYI8GKDHgd9/bqDM3c7Z1WEEgIGJvUj5WUU/rbjqmYmdLPwZArti86UIjpfDw0\nvH4+N3LVWxZr1vHxHqjH1DSNpi+VWqdxpth7QkXBf4xot2IigbRIin1xiPo8DWmH\nRaVzCboDKTYrtjmSacIErOP4CHDFncyn6zKW3SgQ/9BFCGbA9QeUze3ul96sGx/+\no51lizUbfuI/GQiHzympQsZ8nxV4H6W0Cg8cCz+YgQKBgQDthiiRdGl93pgjDmCv\nAeQnZKxDms5VcODQ8TRm9OL6M4DkmOvD8NcYQSUdFIzrNyZPpUs87Cpd8ngnU5W3\n7Kqpon6+B6ThDHO97+wCuU88qFOiW+o5gV2rPARSut9Jnd35Stq8D9S3hsbVjIPS\nWB8J5CRoFID/VYXBwAWxo+4sIQKBgQDMAHMQH1bsnAEfNa+f9XL1q8XnSefvLjCc\nQ3c66A8iqYEgF9JLbITVSXjlBzcdI3Q83UuEcGJCeF0D5FZrJQ2k8iGpVyuGMtTW\nKBHyPKk1Khz9IbDU1HQNn0B7/BBC23VWJBtHYWrw/CtFQ+i0pqGNTQdwnsc8P7jv\n3T0QWQ+wkwKBgEX98pZqJ2vf3BT4d6UaeZDiKaECTSsASD9J1JdCMmBoLOMv7Mmg\nfsG28KjRFXV6mt99Zd5d+V4VxTJRfxzjsKasK4zz07I9aR3fRTzIPoExWPPPAgZQ\nCLocxWlbh9C5pF+Bn1MrlxM9s/nZnj6tmPfhMpk48YpMOU4Ot57RH64BAoGAdgx8\niQPZpSnRbGIAsyuxzoAMEX8u+7Va49IWmLvYplI4Kn4ebw7o/xN5Je868V2m0eGs\n5YKzGYvVJ39mkrHqZ1zGJdwPj6SyjQq699YqhF1OURzB2ybl0UwqYJTIRCgCikpy\njqfM3o7N61MUwhT6v22ntH/tAuxM9GCuCVvAPIkCgYEAhGLhp/mMQWLnf/ejOxpw\nVtF+u4+DuJAeXeGEHpi8eULZrpGiOHr3EWBjxQkE0LB+/vgEFblBySAvOLuCJe+5\nAnyNXHJqAxdVqEaUekOhDseiB0sW6q74PcKfeHmH0Q8Btu9YB8vOVe6ooImYdvEF\nSovhYyfXDwbPN36GzWacky0=\n-----END PRIVATE KEY-----\n","client_email": "oi-bot@oi-project-500817.iam.gserviceaccount.com","client_id": "111686628816773751484","auth_uri": "https://accounts.google.com/o/oauth2/auth","token_uri": "https://oauth2.googleapis.com/token","auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/oi-bot%40oi-project-500817.iam.gserviceaccount.com","universe_domain": "googleapis.com"}", "")   # full JSON string
+DHAN_CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
+DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
+GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 
-# ─────────────────────────────────────────────
-#  CONFIG — update EXPIRY every week (nearest Thursday)
-# ─────────────────────────────────────────────
+
 CONFIG = {
     "SYMBOL":    "NIFTY",
     "EXPIRY":    "2026-07-02",   # ← change this every week to nearest Thursday
