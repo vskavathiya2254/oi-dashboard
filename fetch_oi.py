@@ -8,6 +8,7 @@ import os
 import json
 from google.oauth2.service_account import Credentials
 import gspread
+import datetime
 
 # ─────────────────────────────────────────────
 #  YOUR CREDENTIALS (GitHub Secrets)
@@ -275,7 +276,7 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
-    print(f"🚀 Starting OI fetch — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"🚀 Starting OI fetch — {datetime.datetime.now().strftime('%H:%M:%S')}")
 
     # 1. Fetch data
     spot = fetch_spot_price()
