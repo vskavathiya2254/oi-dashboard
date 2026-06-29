@@ -6,9 +6,11 @@ Fetches CE/PE OI, IV, Vega from Dhan API → pushes to Google Sheets
 
 import os
 import json
-from google.oauth2.service_account import Credentials
+import math
+import requests   # ← REQUIRED
 import gspread
-import datetime
+from datetime import datetime, date
+from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
 #  YOUR CREDENTIALS (GitHub Secrets)
