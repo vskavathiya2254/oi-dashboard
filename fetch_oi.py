@@ -7,85 +7,59 @@ Fetches CE/PE OI, IV, Vega from Dhan API → pushes to Google Sheets
 import os
 import json
 import math
-import requests   # ← REQUIRED
+import requests
 import gspread
-import datetime
+from datetime import datetime, date
 from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
-#  YOUR CREDENTIALS (GitHub Secrets)
+#  YOUR CREDENTIALS (set these as GitHub Secrets)
 # ─────────────────────────────────────────────
 DHAN_CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
-GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")   # full JSON string
 
-
+# ─────────────────────────────────────────────
+#  CONFIG — update EXPIRY every week (nearest Thursday)
+# ─────────────────────────────────────────────
 CONFIG = {
     "SYMBOL":    "NIFTY",
-    "EXPIRY":    "2026-07-02",   # ← change this every week to nearest Thursday
+    "EXPIRY":    "2025-07-03",   # ← change this every week to nearest Thursday
     "STRIKES":   10,             # how many strikes above/below ATM to show
     "RISK_FREE": 0.065,          # risk-free rate (6.5%)
 }
 
-# ─────────────────────────────────────────────
-#  BLACK-SCHOLES VEGA CALCULATOR
-# ─────────────────────────────────────────────
-def norm_cdf(x):
-    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-
-def norm_pdf(x):
-    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
-
-def calc_vega(S, K, T, r, sigma):
-    """Returns vega per 1% IV move"""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        vega = S * norm_pdf(d1) * math.sqrt(T)
-        return round(vega * 0.01, 2)   # vega per 1% move in IV
-    except Exception:
-        return 0.0
-
-def time_to_expiry(expiry_str):
-    """Returns T in years"""
-    expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-    today  = date.today()
-    days   = (expiry - today).days
-    return max(days, 0) / 365.0
+# Dhan's optionchain API returns greeks (including vega) directly per
+# strike, so we don't need to calculate Black-Scholes ourselves.
 
 # ─────────────────────────────────────────────
 #  DHAN API — FETCH OPTIONS CHAIN
 # ─────────────────────────────────────────────
 def fetch_options_chain():
-    url = "https://api.dhan.co/v2/optionChain"
+    # NOTE: Dhan's endpoint is lowercase "optionchain", not "optionChain"
+    url = "https://api.dhan.co/v2/optionchain"
     headers = {
         "access-token": DHAN_ACCESS_TOKEN,
         "client-id":    DHAN_CLIENT_ID,
         "Content-Type": "application/json",
     }
     payload = {
-        "UnderlyingScrip": 13,           # 13 = NIFTY
+        "UnderlyingScrip": 13,           # 13 = NIFTY index
         "UnderlyingSeg":   "IDX_I",
         "Expiry":          CONFIG["EXPIRY"],
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    if resp.status_code != 200:
+        print(f"   Dhan API error {resp.status_code}: {resp.text[:500]}")
     resp.raise_for_status()
     return resp.json()
 
-def fetch_spot_price():
-    url = "https://api.dhan.co/v2/marketfeed/ltp"
-    headers = {
-        "access-token": DHAN_ACCESS_TOKEN,
-        "client-id":    DHAN_CLIENT_ID,
-        "Content-Type": "application/json",
-    }
-    payload = {"IDX_I": [13]}
+def fetch_spot_price(chain_json):
+    # Dhan's optionchain response already includes the underlying LTP
+    # at data.last_price — no separate API call needed
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
-        data = resp.json()
-        return float(data["data"]["IDX_I"]["13"]["last_price"])
+        return float(chain_json["data"]["last_price"])
     except Exception:
         return 0.0
 
@@ -112,34 +86,32 @@ def get_or_create_tab(sheet, title, rows=500, cols=20):
 #  PROCESS DATA
 # ─────────────────────────────────────────────
 def process_chain(raw, spot):
-    """Parse Dhan option chain response → list of strike rows"""
-    T = time_to_expiry(CONFIG["EXPIRY"])
-    r = CONFIG["RISK_FREE"]
-
-    # find ATM
+    """Parse Dhan option chain response → list of strike rows.
+    Actual Dhan response shape:
+    data.oc.{strike}.ce / .pe with fields: oi, implied_volatility,
+    greeks.vega, volume, last_price, etc. (all lowercase keys)
+    """
+    # find ATM — nearest 50-point strike to spot
     atm = round(spot / 50) * 50
 
     rows = []
-    oc_data = raw.get("data", {})
+    oc_data = raw.get("data", {}).get("oc", {})
 
     for strike_str, data in oc_data.items():
         strike = float(strike_str)
 
-        ce = data.get("CE", {})
-        pe = data.get("PE", {})
+        ce = data.get("ce", {}) or {}
+        pe = data.get("pe", {}) or {}
 
-        ce_oi  = ce.get("openInterest", 0) or 0
-        pe_oi  = pe.get("openInterest", 0) or 0
-        ce_iv  = ce.get("impliedVolatility", 0) or 0
-        pe_iv  = pe.get("impliedVolatility", 0) or 0
+        ce_oi  = ce.get("oi", 0) or 0
+        pe_oi  = pe.get("oi", 0) or 0
+        ce_iv  = ce.get("implied_volatility", 0) or 0
+        pe_iv  = pe.get("implied_volatility", 0) or 0
         ce_vol = ce.get("volume", 0) or 0
         pe_vol = pe.get("volume", 0) or 0
 
-        ce_iv_dec = (ce_iv / 100) if ce_iv > 1 else ce_iv
-        pe_iv_dec = (pe_iv / 100) if pe_iv > 1 else pe_iv
-
-        ce_vega = calc_vega(spot, strike, T, r, ce_iv_dec)
-        pe_vega = calc_vega(spot, strike, T, r, pe_iv_dec)
+        ce_vega = ce.get("greeks", {}).get("vega", 0) or 0
+        pe_vega = pe.get("greeks", {}).get("vega", 0) or 0
 
         rows.append({
             "strike":   int(strike),
@@ -148,8 +120,8 @@ def process_chain(raw, spot):
             "pe_oi":    pe_oi,
             "ce_iv":    round(ce_iv, 2),
             "pe_iv":    round(pe_iv, 2),
-            "ce_vega":  ce_vega,
-            "pe_vega":  pe_vega,
+            "ce_vega":  round(ce_vega, 2),
+            "pe_vega":  round(pe_vega, 2),
             "ce_vol":   ce_vol,
             "pe_vol":   pe_vol,
         })
@@ -278,12 +250,15 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
-    print(f"🚀 Starting OI fetch — {datetime.datetime.now().strftime('%H:%M:%S')}")
+    print(f"🚀 Starting OI fetch — {datetime.now().strftime('%H:%M:%S')}")
 
-    # 1. Fetch data
-    spot = fetch_spot_price()
+    # 1. Fetch option chain (this response also contains the spot/LTP)
     raw  = fetch_options_chain()
+    spot = fetch_spot_price(raw)
     print(f"   Spot: {spot}")
+
+    if spot == 0:
+        print("⚠️  Spot price came back as 0 — check EXPIRY date and Dhan credentials")
 
     # 2. Process
     rows, atm = process_chain(raw, spot)
