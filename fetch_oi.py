@@ -398,6 +398,41 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
     ])
     print("✅ History updated")
 
+def write_atm_oi_log(sheet, rows, atm, prev_oi):
+    """Appends ONE new row per run to a simple 3-column log:
+    time | ATM CE OI change | ATM PE OI change — matching the
+    user's reference screenshot exactly. This function only ever
+    APPENDS — it never edits or overwrites past rows, so any
+    manual edits the user makes to old rows are always preserved."""
+    ws = get_or_create_tab(sheet, "ATM OI Log", rows=2000, cols=4)
+    now_str = now_ist().strftime("%H:%M")
+
+    atm_row = next((r for r in rows if r["is_atm"]), None)
+    if not atm_row:
+        print("   ⚠️  ATM OI Log skipped — no ATM strike found this run")
+        return
+
+    prev_ce = prev_oi.get(atm_row["strike"], {}).get("ce_oi", atm_row["ce_oi"])
+    prev_pe = prev_oi.get(atm_row["strike"], {}).get("pe_oi", atm_row["pe_oi"])
+    ce_delta = atm_row["ce_oi"] - prev_ce
+    pe_delta = atm_row["pe_oi"] - prev_pe
+
+    existing = ws.get_all_values()
+    has_header = bool(existing) and bool(existing[0]) and existing[0][0] == "time"
+    if not has_header:
+        ws.update(values=[["time", "ATM CE OI change", "ATM PE OI change"]],
+                   range_name="A1")
+        try:
+            format_cell_range(ws, "A1:C1",
+                CellFormat(backgroundColor=Color(0.13, 0.15, 0.18),
+                           textFormat=TextFormat(bold=True, foregroundColor=Color(0.35, 0.65, 1.0))))
+            set_frozen(ws, rows=1)
+        except Exception as e:
+            print(f"   ⚠️  ATM OI Log formatting skipped: {e}")
+
+    ws.append_row([now_str, ce_delta, pe_delta])
+    print(f"✅ ATM OI Log updated — {now_str}: CE Δ{ce_delta:+}, PE Δ{pe_delta:+}")
+
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
@@ -431,6 +466,7 @@ def main():
     pcr, signal = write_live_oi(sheet, rows, spot, atm, prev_oi, expiry)
     write_vega_table(sheet, rows, spot, atm)
     write_history(sheet, spot, atm, rows, pcr, signal)
+    write_atm_oi_log(sheet, rows, atm, prev_oi)
 
     # 6. Save current OI as prev for next run
     write_prev_oi(sheet, rows)
