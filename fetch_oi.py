@@ -183,7 +183,9 @@ def process_chain(raw, spot):
 # ─────────────────────────────────────────────
 def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     ws = get_or_create_tab(sheet, "Live OI")
-    now = now_ist().strftime("%d-%b-%Y %H:%M")
+    now_dt = now_ist()
+    now = now_dt.strftime("%d-%b-%Y %H:%M:%S")
+    next_refresh = (now_dt + timedelta(minutes=5)).strftime("%H:%M")
 
     total_ce_oi = sum(r["ce_oi"] for r in rows)
     total_pe_oi = sum(r["pe_oi"] for r in rows)
@@ -191,8 +193,10 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     signal = "🟢 BULLISH" if pcr > 1.2 else ("🔴 BEARISH" if pcr < 0.8 else "🟡 NEUTRAL")
 
     header_block = [
-        [f"NIFTY Options OI Dashboard — {now}", "", "", "", "", "", "", ""],
-        [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {expiry}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", ""],
+        [f"NIFTY Options OI Dashboard", "", "", "", "", "", "", "", "", ""],
+        [f"🕒 Last Updated: {now}", "", f"⏭ Next Refresh: ~{next_refresh}", "", "", "", "", "", "",
+         now_dt.strftime("%Y-%m-%dT%H:%M:%S")],   # raw ISO timestamp in col J, for the live freshness formula
+        [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {expiry}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", "", "", ""],
         [""],
         ["STRIKE", "CE OI", "CE ΔOI", "CE IV%", "CE VEGA", "PE OI", "PE ΔOI", "PE IV%", "PE VEGA", "ATM"],
     ]
