@@ -197,7 +197,7 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
 
     all_rows = header_block + data_rows
     ws.clear()
-    ws.update("A1", all_rows)
+    ws.update(values=all_rows, range_name="A1")
     print(f"✅ Live OI tab updated — {now}")
     return pcr, signal
 
@@ -220,7 +220,7 @@ def write_vega_table(sheet, rows, spot, atm):
         ])
 
     ws.clear()
-    ws.update("A1", header + data_rows)
+    ws.update(values=header + data_rows, range_name="A1")
     print("✅ Vega Table updated")
 
 def write_prev_oi(sheet, rows):
@@ -230,7 +230,7 @@ def write_prev_oi(sheet, rows):
     for r in rows:
         data.append([r["strike"], r["ce_oi"], r["pe_oi"]])
     ws.clear()
-    ws.update("A1", data)
+    ws.update(values=data, range_name="A1")
 
 def read_prev_oi(sheet):
     """Read previous OI from hidden tab"""
@@ -252,9 +252,13 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
         return
 
     existing = ws.get_all_values()
-    if not existing or existing[0][0] != "Time":
-        ws.update("A1", [["Time", "Spot", "ATM", "CE OI", "CE ΔOI", "PE OI", "PE ΔOI",
-                           "CE Vega", "PE Vega", "CE IV%", "PE IV%", "PCR", "Signal"]])
+    # A brand-new worksheet can return [[]] (one empty row) rather than
+    # [], so check the first cell safely instead of indexing blindly.
+    has_header = bool(existing) and bool(existing[0]) and existing[0][0] == "Time"
+    if not has_header:
+        ws.update(values=[["Time", "Spot", "ATM", "CE OI", "CE ΔOI", "PE OI", "PE ΔOI",
+                            "CE Vega", "PE Vega", "CE IV%", "PE IV%", "PCR", "Signal"]],
+                   range_name="A1")
 
     ws.append_row([
         now, spot, atm,
