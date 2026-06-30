@@ -2,9 +2,10 @@ name: OI Dashboard Auto-Fetch
 
 on:
   schedule:
-    # Runs every 5 minutes Mon-Fri between 9:00 AM and 3:30 PM IST
-    # IST = UTC+5:30, so 9:00 IST = 3:30 UTC, 15:30 IST = 10:00 UTC
-    - cron: '*/5 3-10 * * 1-5'
+    # Runs every 5 minutes, all day, every day (24/7) — including outside
+    # market hours. Outside 9:15am-3:30pm IST the Dhan API will just return
+    # the last traded/closing values instead of live data, which is fine.
+    - cron: '*/5 * * * *'
   workflow_dispatch:   # allows manual trigger from GitHub website anytime
 
 jobs:
@@ -21,11 +22,13 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests gspread gspread-formatting google-auth
+        run: pip install requests gspread gspread-formatting google-auth pyotp
 
       - name: Run OI fetcher
         env:
           DHAN_CLIENT_ID:    ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN:          ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET:  ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
           GOOGLE_SHEET_ID:   ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
