@@ -21,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests gspread google-auth
+        run: pip install requests gspread gspread-formatting google-auth
 
       - name: Run OI fetcher
         env:
