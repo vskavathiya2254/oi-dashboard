@@ -6,17 +6,19 @@ Fetches CE/PE OI, IV, Vega from Dhan API → pushes to Google Sheets
 
 import os
 import json
-import math
 import requests
 import gspread
+from gspread_formatting import (
+    CellFormat, Color, TextFormat, format_cell_range, set_frozen
+)
 from datetime import datetime, date, timedelta
+from google.oauth2.service_account import Credentials
 
 # GitHub Actions runners run in UTC, so we convert to IST for all timestamps
 IST = timedelta(hours=5, minutes=30)
 
 def now_ist():
     return datetime.utcnow() + IST
-from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
 #  YOUR CREDENTIALS (set these as GitHub Secrets)
@@ -194,8 +196,7 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
 
     header_block = [
         [f"NIFTY Options OI Dashboard", "", "", "", "", "", "", "", "", ""],
-        [f"🕒 Last Updated: {now}", "", f"⏭ Next Refresh: ~{next_refresh}", "", "", "", "", "", "",
-         now_dt.strftime("%Y-%m-%dT%H:%M:%S")],   # raw ISO timestamp in col J, for the live freshness formula
+        [f"🕒 Last Updated: {now}", "", f"⏭ Next Refresh: ~{next_refresh}", "", "", "", "", "", "", ""],
         [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {expiry}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", "", "", ""],
         [""],
         ["STRIKE", "CE OI", "CE ΔOI", "CE IV%", "CE VEGA", "PE OI", "PE ΔOI", "PE IV%", "PE VEGA", "ATM"],
@@ -226,7 +227,71 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     ws.clear()
     ws.update(values=all_rows, range_name="A1")
     print(f"✅ Live OI tab updated — {now}")
+
+    format_live_oi(ws, rows)
+
     return pcr, signal
+
+def format_live_oi(ws, rows):
+    """Applies colors directly from Python — no Apps Script needed.
+    Dark theme, gold ATM row, red/green OI-delta highlighting."""
+    n_data_rows = len(rows)
+    last_row = 5 + n_data_rows   # header block is 5 rows, data starts at row 6
+    last_col_letter = "J"
+
+    dark_bg     = Color(0.05, 0.07, 0.09)
+    title_bg    = Color(0.05, 0.07, 0.09)
+    title_fg    = Color(0.0, 1.0, 0.53)
+    time_bg     = Color(0.10, 0.18, 0.10)
+    time_fg     = Color(0.49, 0.91, 0.53)
+    info_bg     = Color(0.09, 0.10, 0.13)
+    info_fg     = Color(0.79, 0.82, 0.85)
+    colhdr_bg   = Color(0.13, 0.15, 0.18)
+    colhdr_fg   = Color(0.35, 0.65, 1.0)
+    atm_bg      = Color(0.18, 0.16, 0.0)
+    atm_fg      = Color(1.0, 0.84, 0.0)
+    normal_fg   = Color(0.79, 0.82, 0.85)
+    red_fg      = Color(1.0, 0.27, 0.27)
+    green_fg    = Color(0.0, 0.80, 0.27)
+
+    try:
+        # Row 1 — title
+        format_cell_range(ws, f"A1:{last_col_letter}1",
+            CellFormat(backgroundColor=title_bg,
+                       textFormat=TextFormat(bold=True, foregroundColor=title_fg, fontSize=13)))
+
+        # Row 2 — Last Updated / Next Refresh
+        format_cell_range(ws, f"A2:{last_col_letter}2",
+            CellFormat(backgroundColor=time_bg,
+                       textFormat=TextFormat(bold=True, foregroundColor=time_fg, fontSize=12)))
+
+        # Row 3 — Spot / ATM / Expiry / PCR / Signal
+        format_cell_range(ws, f"A3:{last_col_letter}3",
+            CellFormat(backgroundColor=info_bg,
+                       textFormat=TextFormat(foregroundColor=info_fg, fontSize=11)))
+
+        # Row 5 — column headers
+        format_cell_range(ws, f"A5:{last_col_letter}5",
+            CellFormat(backgroundColor=colhdr_bg,
+                       textFormat=TextFormat(bold=True, foregroundColor=colhdr_fg, fontSize=11)))
+
+        # Data rows — ATM row gold, rest dark; CE/PE delta colored red/green
+        for i, r in enumerate(rows):
+            row_num = 6 + i
+            if r["is_atm"]:
+                format_cell_range(ws, f"A{row_num}:J{row_num}",
+                    CellFormat(backgroundColor=atm_bg,
+                               textFormat=TextFormat(bold=True, foregroundColor=atm_fg)))
+            else:
+                format_cell_range(ws, f"A{row_num}:J{row_num}",
+                    CellFormat(backgroundColor=dark_bg,
+                               textFormat=TextFormat(foregroundColor=normal_fg)))
+
+        set_frozen(ws, rows=5)
+        print("   🎨 Formatting applied")
+    except Exception as e:
+        # Formatting is cosmetic — don't let a formatting failure crash the whole run
+        print(f"   ⚠️  Formatting skipped due to error: {e}")
 
 def write_vega_table(sheet, rows, spot, atm):
     ws = get_or_create_tab(sheet, "Vega Table")
@@ -249,6 +314,42 @@ def write_vega_table(sheet, rows, spot, atm):
     ws.clear()
     ws.update(values=header + data_rows, range_name="A1")
     print("✅ Vega Table updated")
+
+    format_vega_table(ws, rows)
+
+def format_vega_table(ws, rows):
+    """Python-based formatting for the Vega Table tab."""
+    title_bg  = Color(0.05, 0.07, 0.09)
+    title_fg  = Color(0.65, 0.49, 0.98)
+    colhdr_bg = Color(0.13, 0.15, 0.18)
+    colhdr_fg = Color(0.35, 0.65, 1.0)
+    dark_bg   = Color(0.05, 0.07, 0.09)
+    normal_fg = Color(0.79, 0.82, 0.85)
+    atm_bg    = Color(0.18, 0.16, 0.0)
+    atm_fg    = Color(1.0, 0.84, 0.0)
+
+    try:
+        format_cell_range(ws, "A1:G1",
+            CellFormat(backgroundColor=title_bg,
+                       textFormat=TextFormat(bold=True, foregroundColor=title_fg, fontSize=13)))
+        format_cell_range(ws, "A2:G2",
+            CellFormat(backgroundColor=colhdr_bg,
+                       textFormat=TextFormat(bold=True, foregroundColor=colhdr_fg)))
+
+        for i, r in enumerate(rows):
+            row_num = 3 + i
+            if r["is_atm"]:
+                format_cell_range(ws, f"A{row_num}:G{row_num}",
+                    CellFormat(backgroundColor=atm_bg,
+                               textFormat=TextFormat(bold=True, foregroundColor=atm_fg)))
+            else:
+                format_cell_range(ws, f"A{row_num}:G{row_num}",
+                    CellFormat(backgroundColor=dark_bg,
+                               textFormat=TextFormat(foregroundColor=normal_fg)))
+
+        set_frozen(ws, rows=2)
+    except Exception as e:
+        print(f"   ⚠️  Vega Table formatting skipped due to error: {e}")
 
 def write_prev_oi(sheet, rows):
     """Save current OI as 'previous' for next run's delta calc"""
