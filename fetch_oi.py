@@ -30,8 +30,10 @@ CONFIG = {
 }
 
 def fetch_nearest_expiry():
-    """Asks Dhan for the live list of valid expiries and picks the nearest one,
-    so we never have to hardcode/update a date manually again."""
+    """Asks Dhan for the live list of valid expiries and picks the nearest
+    one that falls on a Tuesday — NIFTY's weekly expiry day since NSE moved
+    it from Thursday to Tuesday in September 2025. Falls back to the
+    soonest expiry of any day if no Tuesday is found (e.g. holiday shift)."""
     url = "https://api.dhan.co/v2/optionchain/expirylist"
     headers = {
         "access-token": DHAN_ACCESS_TOKEN,
@@ -46,8 +48,23 @@ def fetch_nearest_expiry():
     expiries = resp.json().get("data", [])
     if not expiries:
         raise RuntimeError("Dhan returned an empty expiry list")
-    nearest = expiries[0]   # Dhan returns them sorted, nearest first
-    print(f"   📅 Using nearest expiry: {nearest}")
+
+    # Dhan returns dates sorted soonest-first, e.g. "2026-07-07"
+    # Python weekday(): Monday=0 ... Tuesday=1 ... Sunday=6
+    tuesday_expiries = [
+        e for e in expiries
+        if datetime.strptime(e, "%Y-%m-%d").weekday() == 1
+    ]
+
+    if tuesday_expiries:
+        nearest = tuesday_expiries[0]
+        print(f"   📅 Using nearest Tuesday expiry: {nearest}")
+    else:
+        # No Tuesday expiry found (e.g. holiday shifted it) — fall back
+        # to whatever's soonest so the script doesn't crash
+        nearest = expiries[0]
+        print(f"   ⚠️  No Tuesday expiry found, falling back to soonest: {nearest}")
+
     return nearest
 
 # Dhan's optionchain API returns greeks (including vega) directly per
