@@ -8,6 +8,7 @@ import os
 import json
 import requests
 import gspread
+import pyotp
 from gspread_formatting import (
     CellFormat, Color, TextFormat, format_cell_range, set_frozen
 )
@@ -24,9 +25,46 @@ def now_ist():
 #  YOUR CREDENTIALS (set these as GitHub Secrets)
 # ─────────────────────────────────────────────
 DHAN_CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
-DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")   # paste fresh token daily — see SETUP_GUIDE
+DHAN_PIN          = os.environ.get("DHAN_PIN", "")           # 6-digit Dhan login PIN
+DHAN_TOTP_SECRET  = os.environ.get("DHAN_TOTP_SECRET", "")   # text secret from Dhan Web TOTP setup
+DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")  # optional manual fallback — see SETUP_GUIDE
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")   # full JSON string
+
+def get_access_token():
+    """Auto-generates a brand new Dhan access token using TOTP every run,
+    so it's always fresh and never expires on you. Falls back to a manually
+    pasted DHAN_ACCESS_TOKEN secret if TOTP isn't set up yet."""
+    if DHAN_PIN and DHAN_TOTP_SECRET:
+        totp_code = pyotp.TOTP(DHAN_TOTP_SECRET).now()
+        url = "https://auth.dhan.co/app/generateAccessToken"
+        params = {
+            "dhanClientId": DHAN_CLIENT_ID,
+            "pin": DHAN_PIN,
+            "totp": totp_code,
+        }
+        resp = requests.post(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            print(f"   TOTP token generation error {resp.status_code}: {resp.text[:500]}")
+            if DHAN_ACCESS_TOKEN:
+                print("   ⚠️  Falling back to manually-set DHAN_ACCESS_TOKEN secret")
+                return DHAN_ACCESS_TOKEN
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("accessToken")
+        if not token:
+            raise RuntimeError(f"No accessToken in TOTP response: {data}")
+        print(f"   ✅ Fresh access token generated via TOTP (expires {data.get('expiryTime')})")
+        return token
+
+    if DHAN_ACCESS_TOKEN:
+        print("   ℹ️  Using manually-set DHAN_ACCESS_TOKEN secret (TOTP not configured)")
+        return DHAN_ACCESS_TOKEN
+
+    raise RuntimeError(
+        "No way to authenticate — set either (DHAN_PIN + DHAN_TOTP_SECRET) "
+        "or DHAN_ACCESS_TOKEN as GitHub secrets"
+    )
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -437,10 +475,11 @@ def write_atm_oi_log(sheet, rows, atm, prev_oi):
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
+    global DHAN_ACCESS_TOKEN
     print(f"🚀 Starting OI fetch — {now_ist().strftime('%H:%M:%S')}")
 
-    if not DHAN_ACCESS_TOKEN:
-        raise RuntimeError("DHAN_ACCESS_TOKEN is empty — check your GitHub secret")
+    # 0. Get a fresh access token — via TOTP if configured, else manual fallback
+    DHAN_ACCESS_TOKEN = get_access_token()
 
     # 1. Get the nearest valid expiry directly from Dhan (no manual updating needed)
     expiry = fetch_nearest_expiry()
