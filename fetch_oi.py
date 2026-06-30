@@ -9,7 +9,13 @@ import json
 import math
 import requests
 import gspread
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+
+# GitHub Actions runners run in UTC, so we convert to IST for all timestamps
+IST = timedelta(hours=5, minutes=30)
+
+def now_ist():
+    return datetime.utcnow() + IST
 from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
@@ -177,7 +183,7 @@ def process_chain(raw, spot):
 # ─────────────────────────────────────────────
 def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     ws = get_or_create_tab(sheet, "Live OI")
-    now = datetime.now().strftime("%d-%b-%Y %H:%M")
+    now = now_ist().strftime("%d-%b-%Y %H:%M")
 
     total_ce_oi = sum(r["ce_oi"] for r in rows)
     total_pe_oi = sum(r["pe_oi"] for r in rows)
@@ -220,7 +226,7 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
 
 def write_vega_table(sheet, rows, spot, atm):
     ws = get_or_create_tab(sheet, "Vega Table")
-    now = datetime.now().strftime("%d-%b %H:%M")
+    now = now_ist().strftime("%d-%b %H:%M")
 
     header = [
         [f"Vega Table — {now}  |  Spot: {spot:.0f}"],
@@ -261,7 +267,7 @@ def read_prev_oi(sheet):
 def write_history(sheet, spot, atm, rows, pcr, signal):
     """Append one row per run to History tab"""
     ws = get_or_create_tab(sheet, "History", rows=2000, cols=15)
-    now = datetime.now().strftime("%d-%b %H:%M")
+    now = now_ist().strftime("%d-%b %H:%M")
 
     # get ATM row
     atm_row = next((r for r in rows if r["is_atm"]), None)
@@ -291,7 +297,7 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
-    print(f"🚀 Starting OI fetch — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"🚀 Starting OI fetch — {now_ist().strftime('%H:%M:%S')}")
 
     if not DHAN_ACCESS_TOKEN:
         raise RuntimeError("DHAN_ACCESS_TOKEN is empty — check your GitHub secret")
