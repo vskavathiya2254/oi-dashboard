@@ -16,19 +16,39 @@ from google.oauth2.service_account import Credentials
 #  YOUR CREDENTIALS (set these as GitHub Secrets)
 # ─────────────────────────────────────────────
 DHAN_CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
-DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
+DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")   # paste fresh token daily — see SETUP_GUIDE
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")   # full JSON string
 
 # ─────────────────────────────────────────────
-#  CONFIG — update EXPIRY every week (nearest Thursday)
+#  CONFIG
 # ─────────────────────────────────────────────
 CONFIG = {
     "SYMBOL":    "NIFTY",
-    "EXPIRY":    "2025-07-03",   # ← change this every week to nearest Thursday
     "STRIKES":   10,             # how many strikes above/below ATM to show
     "RISK_FREE": 0.065,          # risk-free rate (6.5%)
 }
+
+def fetch_nearest_expiry():
+    """Asks Dhan for the live list of valid expiries and picks the nearest one,
+    so we never have to hardcode/update a date manually again."""
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    headers = {
+        "access-token": DHAN_ACCESS_TOKEN,
+        "client-id":    DHAN_CLIENT_ID,
+        "Content-Type": "application/json",
+    }
+    payload = {"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}
+    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    if resp.status_code != 200:
+        print(f"   Expiry list error {resp.status_code}: {resp.text[:500]}")
+    resp.raise_for_status()
+    expiries = resp.json().get("data", [])
+    if not expiries:
+        raise RuntimeError("Dhan returned an empty expiry list")
+    nearest = expiries[0]   # Dhan returns them sorted, nearest first
+    print(f"   📅 Using nearest expiry: {nearest}")
+    return nearest
 
 # Dhan's optionchain API returns greeks (including vega) directly per
 # strike, so we don't need to calculate Black-Scholes ourselves.
@@ -36,7 +56,7 @@ CONFIG = {
 # ─────────────────────────────────────────────
 #  DHAN API — FETCH OPTIONS CHAIN
 # ─────────────────────────────────────────────
-def fetch_options_chain():
+def fetch_options_chain(expiry):
     # NOTE: Dhan's endpoint is lowercase "optionchain", not "optionChain"
     url = "https://api.dhan.co/v2/optionchain"
     headers = {
@@ -47,7 +67,7 @@ def fetch_options_chain():
     payload = {
         "UnderlyingScrip": 13,           # 13 = NIFTY index
         "UnderlyingSeg":   "IDX_I",
-        "Expiry":          CONFIG["EXPIRY"],
+        "Expiry":          expiry,
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=15)
     if resp.status_code != 200:
@@ -138,7 +158,7 @@ def process_chain(raw, spot):
 # ─────────────────────────────────────────────
 #  WRITE TO SHEETS
 # ─────────────────────────────────────────────
-def write_live_oi(sheet, rows, spot, atm, prev_oi):
+def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     ws = get_or_create_tab(sheet, "Live OI")
     now = datetime.now().strftime("%d-%b-%Y %H:%M")
 
@@ -149,7 +169,7 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi):
 
     header_block = [
         [f"NIFTY Options OI Dashboard — {now}", "", "", "", "", "", "", ""],
-        [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {CONFIG['EXPIRY']}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", ""],
+        [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {expiry}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", ""],
         [""],
         ["STRIKE", "CE OI", "CE ΔOI", "CE IV%", "CE VEGA", "PE OI", "PE ΔOI", "PE IV%", "PE VEGA", "ATM"],
     ]
@@ -252,25 +272,31 @@ def write_history(sheet, spot, atm, rows, pcr, signal):
 def main():
     print(f"🚀 Starting OI fetch — {datetime.now().strftime('%H:%M:%S')}")
 
-    # 1. Fetch option chain (this response also contains the spot/LTP)
-    raw  = fetch_options_chain()
+    if not DHAN_ACCESS_TOKEN:
+        raise RuntimeError("DHAN_ACCESS_TOKEN is empty — check your GitHub secret")
+
+    # 1. Get the nearest valid expiry directly from Dhan (no manual updating needed)
+    expiry = fetch_nearest_expiry()
+
+    # 2. Fetch option chain (this response also contains the spot/LTP)
+    raw  = fetch_options_chain(expiry)
     spot = fetch_spot_price(raw)
     print(f"   Spot: {spot}")
 
     if spot == 0:
-        print("⚠️  Spot price came back as 0 — check EXPIRY date and Dhan credentials")
+        print("⚠️  Spot price came back as 0 — check Dhan credentials")
 
-    # 2. Process
+    # 3. Process
     rows, atm = process_chain(raw, spot)
 
-    # 3. Connect to Sheets
+    # 4. Connect to Sheets
     sheet = get_sheet_client()
 
-    # 4. Read previous OI for delta
+    # 5. Read previous OI for delta
     prev_oi = read_prev_oi(sheet)
 
-    # 5. Write all tabs
-    pcr, signal = write_live_oi(sheet, rows, spot, atm, prev_oi)
+    # 6. Write all tabs
+    pcr, signal = write_live_oi(sheet, rows, spot, atm, prev_oi, expiry)
     write_vega_table(sheet, rows, spot, atm)
     write_history(sheet, spot, atm, rows, pcr, signal)
 
