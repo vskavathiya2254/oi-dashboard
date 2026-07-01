@@ -3,7 +3,7 @@ name: OI Dashboard Auto-Fetch
 on:
   schedule:
     - cron: '*/5 * * * *'   # every 5 minutes, all day, every day
-  workflow_dispatch:          # also allows manual trigger from GitHub website
+  workflow_dispatch:          # manual trigger from GitHub website anytime
 
 jobs:
   fetch-oi:
@@ -23,8 +23,6 @@ jobs:
 
       - name: Run OI fetcher
         env:
-          DHAN_CLIENT_ID:    ${{ secrets.DHAN_CLIENT_ID }}
-          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
           GOOGLE_SHEET_ID:   ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
         run: python fetch_oi.py
