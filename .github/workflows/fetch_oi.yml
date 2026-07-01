@@ -2,8 +2,8 @@ name: OI Dashboard Auto-Fetch
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes, all day, every day
-  workflow_dispatch:          # manual trigger from GitHub website anytime
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   fetch-oi:
@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests gspread gspread-formatting google-auth
+        run: pip install "nse[server]" gspread gspread-formatting google-auth
 
       - name: Run OI fetcher
         env:
