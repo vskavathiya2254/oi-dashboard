@@ -2,84 +2,43 @@
 Options OI + Vega Dashboard - GitHub Actions Script
 Runs every 5 minutes via GitHub Actions
 Fetches CE/PE OI, IV, Vega from Dhan API → pushes to Google Sheets
+
+MANUAL TOKEN VERSION — paste a fresh DHAN_ACCESS_TOKEN secret in
+GitHub once a day before market open (Dhan tokens expire every 24h).
 """
 
 import os
 import json
 import requests
 import gspread
-import pyotp
 from gspread_formatting import (
     CellFormat, Color, TextFormat, format_cell_range, set_frozen
 )
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
 
-# GitHub Actions runners run in UTC, so we convert to IST for all timestamps
 IST = timedelta(hours=5, minutes=30)
 
 def now_ist():
     return datetime.utcnow() + IST
 
 # ─────────────────────────────────────────────
-#  YOUR CREDENTIALS (set these as GitHub Secrets)
+#  CREDENTIALS — set these as GitHub Secrets
 # ─────────────────────────────────────────────
 DHAN_CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
-DHAN_PIN          = os.environ.get("DHAN_PIN", "")           # 6-digit Dhan login PIN
-DHAN_TOTP_SECRET  = os.environ.get("DHAN_TOTP_SECRET", "")   # text secret from Dhan Web TOTP setup
-DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")  # optional manual fallback — see SETUP_GUIDE
+DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
-GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")   # full JSON string
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 
-def get_access_token():
-    """Auto-generates a brand new Dhan access token using TOTP every run,
-    so it's always fresh and never expires on you. Falls back to a manually
-    pasted DHAN_ACCESS_TOKEN secret if TOTP isn't set up yet."""
-    if DHAN_PIN and DHAN_TOTP_SECRET:
-        totp_code = pyotp.TOTP(DHAN_TOTP_SECRET).now()
-        url = "https://auth.dhan.co/app/generateAccessToken"
-        params = {
-            "dhanClientId": DHAN_CLIENT_ID,
-            "pin": DHAN_PIN,
-            "totp": totp_code,
-        }
-        resp = requests.post(url, params=params, timeout=15)
-        if resp.status_code != 200:
-            print(f"   TOTP token generation error {resp.status_code}: {resp.text[:500]}")
-            if DHAN_ACCESS_TOKEN:
-                print("   ⚠️  Falling back to manually-set DHAN_ACCESS_TOKEN secret")
-                return DHAN_ACCESS_TOKEN
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("accessToken")
-        if not token:
-            raise RuntimeError(f"No accessToken in TOTP response: {data}")
-        print(f"   ✅ Fresh access token generated via TOTP (expires {data.get('expiryTime')})")
-        return token
-
-    if DHAN_ACCESS_TOKEN:
-        print("   ℹ️  Using manually-set DHAN_ACCESS_TOKEN secret (TOTP not configured)")
-        return DHAN_ACCESS_TOKEN
-
-    raise RuntimeError(
-        "No way to authenticate — set either (DHAN_PIN + DHAN_TOTP_SECRET) "
-        "or DHAN_ACCESS_TOKEN as GitHub secrets"
-    )
-
-# ─────────────────────────────────────────────
-#  CONFIG
-# ─────────────────────────────────────────────
 CONFIG = {
-    "SYMBOL":    "NIFTY",
-    "STRIKES":   10,             # how many strikes above/below ATM to show
-    "RISK_FREE": 0.065,          # risk-free rate (6.5%)
+    "SYMBOL":  "NIFTY",
+    "STRIKES": 10,
 }
 
+# ─────────────────────────────────────────────
+#  DHAN API
+# ─────────────────────────────────────────────
 def fetch_nearest_expiry():
-    """Asks Dhan for the live list of valid expiries and picks the nearest
-    one that falls on a Tuesday — NIFTY's weekly expiry day since NSE moved
-    it from Thursday to Tuesday in September 2025. Falls back to the
-    soonest expiry of any day if no Tuesday is found (e.g. holiday shift)."""
     url = "https://api.dhan.co/v2/optionchain/expirylist"
     headers = {
         "access-token": DHAN_ACCESS_TOKEN,
@@ -95,32 +54,19 @@ def fetch_nearest_expiry():
     if not expiries:
         raise RuntimeError("Dhan returned an empty expiry list")
 
-    # Dhan returns dates sorted soonest-first, e.g. "2026-07-07"
-    # Python weekday(): Monday=0 ... Tuesday=1 ... Sunday=6
     tuesday_expiries = [
         e for e in expiries
         if datetime.strptime(e, "%Y-%m-%d").weekday() == 1
     ]
-
     if tuesday_expiries:
         nearest = tuesday_expiries[0]
         print(f"   📅 Using nearest Tuesday expiry: {nearest}")
     else:
-        # No Tuesday expiry found (e.g. holiday shifted it) — fall back
-        # to whatever's soonest so the script doesn't crash
         nearest = expiries[0]
-        print(f"   ⚠️  No Tuesday expiry found, falling back to soonest: {nearest}")
-
+        print(f"   ⚠️  No Tuesday expiry found, falling back to: {nearest}")
     return nearest
 
-# Dhan's optionchain API returns greeks (including vega) directly per
-# strike, so we don't need to calculate Black-Scholes ourselves.
-
-# ─────────────────────────────────────────────
-#  DHAN API — FETCH OPTIONS CHAIN
-# ─────────────────────────────────────────────
 def fetch_options_chain(expiry):
-    # NOTE: Dhan's endpoint is lowercase "optionchain", not "optionChain"
     url = "https://api.dhan.co/v2/optionchain"
     headers = {
         "access-token": DHAN_ACCESS_TOKEN,
@@ -128,7 +74,7 @@ def fetch_options_chain(expiry):
         "Content-Type": "application/json",
     }
     payload = {
-        "UnderlyingScrip": 13,           # 13 = NIFTY index
+        "UnderlyingScrip": 13,
         "UnderlyingSeg":   "IDX_I",
         "Expiry":          expiry,
     }
@@ -139,15 +85,13 @@ def fetch_options_chain(expiry):
     return resp.json()
 
 def fetch_spot_price(chain_json):
-    # Dhan's optionchain response already includes the underlying LTP
-    # at data.last_price — no separate API call needed
     try:
         return float(chain_json["data"]["last_price"])
     except Exception:
         return 0.0
 
 # ─────────────────────────────────────────────
-#  GOOGLE SHEETS SETUP
+#  GOOGLE SHEETS
 # ─────────────────────────────────────────────
 def get_sheet_client():
     scopes = [
@@ -169,57 +113,34 @@ def get_or_create_tab(sheet, title, rows=500, cols=20):
 #  PROCESS DATA
 # ─────────────────────────────────────────────
 def process_chain(raw, spot):
-    """Parse Dhan option chain response → list of strike rows.
-    Actual Dhan response shape:
-    data.oc.{strike}.ce / .pe with fields: oi, implied_volatility,
-    greeks.vega, volume, last_price, etc. (all lowercase keys)
-    """
-    # find ATM — nearest 50-point strike to spot
     atm = round(spot / 50) * 50
-
     rows = []
     oc_data = raw.get("data", {}).get("oc", {})
 
     for strike_str, data in oc_data.items():
         strike = float(strike_str)
-
         ce = data.get("ce", {}) or {}
         pe = data.get("pe", {}) or {}
 
-        ce_oi  = ce.get("oi", 0) or 0
-        pe_oi  = pe.get("oi", 0) or 0
-        ce_iv  = ce.get("implied_volatility", 0) or 0
-        pe_iv  = pe.get("implied_volatility", 0) or 0
-        ce_vol = ce.get("volume", 0) or 0
-        pe_vol = pe.get("volume", 0) or 0
-
-        ce_vega = ce.get("greeks", {}).get("vega", 0) or 0
-        pe_vega = pe.get("greeks", {}).get("vega", 0) or 0
-
         rows.append({
-            "strike":   int(strike),
-            "is_atm":   (strike == atm),
-            "ce_oi":    ce_oi,
-            "pe_oi":    pe_oi,
-            "ce_iv":    round(ce_iv, 2),
-            "pe_iv":    round(pe_iv, 2),
-            "ce_vega":  round(ce_vega, 2),
-            "pe_vega":  round(pe_vega, 2),
-            "ce_vol":   ce_vol,
-            "pe_vol":   pe_vol,
+            "strike":  int(strike),
+            "is_atm":  (strike == atm),
+            "ce_oi":   ce.get("oi", 0) or 0,
+            "pe_oi":   pe.get("oi", 0) or 0,
+            "ce_iv":   round(ce.get("implied_volatility", 0) or 0, 2),
+            "pe_iv":   round(pe.get("implied_volatility", 0) or 0, 2),
+            "ce_vega": round(ce.get("greeks", {}).get("vega", 0) or 0, 2),
+            "pe_vega": round(pe.get("greeks", {}).get("vega", 0) or 0, 2),
         })
 
     rows.sort(key=lambda x: x["strike"])
-
-    # filter ±N strikes around ATM
     n = CONFIG["STRIKES"]
     atm_idx = next((i for i, r in enumerate(rows) if r["strike"] == atm), len(rows)//2)
     rows = rows[max(0, atm_idx - n): atm_idx + n + 1]
-
     return rows, atm
 
 # ─────────────────────────────────────────────
-#  WRITE TO SHEETS
+#  WRITE TABS
 # ─────────────────────────────────────────────
 def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     ws = get_or_create_tab(sheet, "Live OI")
@@ -233,7 +154,7 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     signal = "🟢 BULLISH" if pcr > 1.2 else ("🔴 BEARISH" if pcr < 0.8 else "🟡 NEUTRAL")
 
     header_block = [
-        [f"NIFTY Options OI Dashboard", "", "", "", "", "", "", "", "", ""],
+        ["NIFTY Options OI Dashboard", "", "", "", "", "", "", "", "", ""],
         [f"🕒 Last Updated: {now}", "", f"⏭ Next Refresh: ~{next_refresh}", "", "", "", "", "", "", ""],
         [f"Spot: {spot:.0f}", f"ATM: {atm}", f"Expiry: {expiry}", "", f"OI PCR: {pcr}", f"Signal: {signal}", "", "", "", ""],
         [""],
@@ -244,162 +165,89 @@ def write_live_oi(sheet, rows, spot, atm, prev_oi, expiry):
     for r in rows:
         prev_ce = prev_oi.get(r["strike"], {}).get("ce_oi", r["ce_oi"])
         prev_pe = prev_oi.get(r["strike"], {}).get("pe_oi", r["pe_oi"])
-        ce_delta = r["ce_oi"] - prev_ce
-        pe_delta = r["pe_oi"] - prev_pe
-        atm_mark = "◀ ATM" if r["is_atm"] else ""
-
         data_rows.append([
-            r["strike"],
-            r["ce_oi"],
-            ce_delta,
-            r["ce_iv"],
-            r["ce_vega"],
-            r["pe_oi"],
-            pe_delta,
-            r["pe_iv"],
-            r["pe_vega"],
-            atm_mark,
+            r["strike"], r["ce_oi"], r["ce_oi"] - prev_ce,
+            r["ce_iv"], r["ce_vega"],
+            r["pe_oi"], r["pe_oi"] - prev_pe,
+            r["pe_iv"], r["pe_vega"],
+            "◀ ATM" if r["is_atm"] else "",
         ])
 
-    all_rows = header_block + data_rows
     ws.clear()
-    ws.update(values=all_rows, range_name="A1")
-    print(f"✅ Live OI tab updated — {now}")
-
+    ws.update(values=header_block + data_rows, range_name="A1")
+    print(f"✅ Live OI updated — {now}")
     format_live_oi(ws, rows)
-
     return pcr, signal
 
 def format_live_oi(ws, rows):
-    """Applies colors directly from Python — no Apps Script needed.
-    Dark theme, gold ATM row, red/green OI-delta highlighting."""
-    n_data_rows = len(rows)
-    last_row = 5 + n_data_rows   # header block is 5 rows, data starts at row 6
-    last_col_letter = "J"
-
-    dark_bg     = Color(0.05, 0.07, 0.09)
-    title_bg    = Color(0.05, 0.07, 0.09)
-    title_fg    = Color(0.0, 1.0, 0.53)
-    time_bg     = Color(0.10, 0.18, 0.10)
-    time_fg     = Color(0.49, 0.91, 0.53)
-    info_bg     = Color(0.09, 0.10, 0.13)
-    info_fg     = Color(0.79, 0.82, 0.85)
-    colhdr_bg   = Color(0.13, 0.15, 0.18)
-    colhdr_fg   = Color(0.35, 0.65, 1.0)
-    atm_bg      = Color(0.18, 0.16, 0.0)
-    atm_fg      = Color(1.0, 0.84, 0.0)
-    normal_fg   = Color(0.79, 0.82, 0.85)
-    red_fg      = Color(1.0, 0.27, 0.27)
-    green_fg    = Color(0.0, 0.80, 0.27)
-
     try:
-        # Row 1 — title
-        format_cell_range(ws, f"A1:{last_col_letter}1",
-            CellFormat(backgroundColor=title_bg,
-                       textFormat=TextFormat(bold=True, foregroundColor=title_fg, fontSize=13)))
+        dark   = Color(0.05, 0.07, 0.09)
+        green  = Color(0.0,  1.0,  0.53)
+        tgreen = Color(0.10, 0.18, 0.10)
+        lgreen = Color(0.49, 0.91, 0.53)
+        dgray  = Color(0.09, 0.10, 0.13)
+        lgray  = Color(0.79, 0.82, 0.85)
+        hdr    = Color(0.13, 0.15, 0.18)
+        blue   = Color(0.35, 0.65, 1.0)
+        atmbg  = Color(0.18, 0.16, 0.0)
+        atmfg  = Color(1.0,  0.84, 0.0)
 
-        # Row 2 — Last Updated / Next Refresh
-        format_cell_range(ws, f"A2:{last_col_letter}2",
-            CellFormat(backgroundColor=time_bg,
-                       textFormat=TextFormat(bold=True, foregroundColor=time_fg, fontSize=12)))
+        format_cell_range(ws, "A1:J1", CellFormat(backgroundColor=dark,   textFormat=TextFormat(bold=True, foregroundColor=green,  fontSize=13)))
+        format_cell_range(ws, "A2:J2", CellFormat(backgroundColor=tgreen, textFormat=TextFormat(bold=True, foregroundColor=lgreen, fontSize=12)))
+        format_cell_range(ws, "A3:J3", CellFormat(backgroundColor=dgray,  textFormat=TextFormat(foregroundColor=lgray, fontSize=11)))
+        format_cell_range(ws, "A5:J5", CellFormat(backgroundColor=hdr,    textFormat=TextFormat(bold=True, foregroundColor=blue,   fontSize=11)))
 
-        # Row 3 — Spot / ATM / Expiry / PCR / Signal
-        format_cell_range(ws, f"A3:{last_col_letter}3",
-            CellFormat(backgroundColor=info_bg,
-                       textFormat=TextFormat(foregroundColor=info_fg, fontSize=11)))
-
-        # Row 5 — column headers
-        format_cell_range(ws, f"A5:{last_col_letter}5",
-            CellFormat(backgroundColor=colhdr_bg,
-                       textFormat=TextFormat(bold=True, foregroundColor=colhdr_fg, fontSize=11)))
-
-        # Data rows — ATM row gold, rest dark; CE/PE delta colored red/green
         for i, r in enumerate(rows):
-            row_num = 6 + i
+            rn = 6 + i
             if r["is_atm"]:
-                format_cell_range(ws, f"A{row_num}:J{row_num}",
-                    CellFormat(backgroundColor=atm_bg,
-                               textFormat=TextFormat(bold=True, foregroundColor=atm_fg)))
+                format_cell_range(ws, f"A{rn}:J{rn}", CellFormat(backgroundColor=atmbg, textFormat=TextFormat(bold=True, foregroundColor=atmfg)))
             else:
-                format_cell_range(ws, f"A{row_num}:J{row_num}",
-                    CellFormat(backgroundColor=dark_bg,
-                               textFormat=TextFormat(foregroundColor=normal_fg)))
+                format_cell_range(ws, f"A{rn}:J{rn}", CellFormat(backgroundColor=dark,  textFormat=TextFormat(foregroundColor=lgray)))
 
         set_frozen(ws, rows=5)
         print("   🎨 Formatting applied")
     except Exception as e:
-        # Formatting is cosmetic — don't let a formatting failure crash the whole run
-        print(f"   ⚠️  Formatting skipped due to error: {e}")
+        print(f"   ⚠️  Formatting skipped: {e}")
 
 def write_vega_table(sheet, rows, spot, atm):
     ws = get_or_create_tab(sheet, "Vega Table")
     now = now_ist().strftime("%d-%b %H:%M")
-
     header = [
         [f"Vega Table — {now}  |  Spot: {spot:.0f}"],
         ["STRIKE", "CE IV%", "CE VEGA", "PE IV%", "PE VEGA", "TOTAL VEGA", "ATM"],
     ]
-
     data_rows = []
     for r in rows:
-        total_vega = round(r["ce_vega"] + r["pe_vega"], 2)
-        atm_mark = "◀ ATM" if r["is_atm"] else ""
         data_rows.append([
             r["strike"], r["ce_iv"], r["ce_vega"],
-            r["pe_iv"], r["pe_vega"], total_vega, atm_mark,
+            r["pe_iv"],  r["pe_vega"],
+            round(r["ce_vega"] + r["pe_vega"], 2),
+            "◀ ATM" if r["is_atm"] else "",
         ])
-
     ws.clear()
     ws.update(values=header + data_rows, range_name="A1")
     print("✅ Vega Table updated")
-
-    format_vega_table(ws, rows)
-
-def format_vega_table(ws, rows):
-    """Python-based formatting for the Vega Table tab."""
-    title_bg  = Color(0.05, 0.07, 0.09)
-    title_fg  = Color(0.65, 0.49, 0.98)
-    colhdr_bg = Color(0.13, 0.15, 0.18)
-    colhdr_fg = Color(0.35, 0.65, 1.0)
-    dark_bg   = Color(0.05, 0.07, 0.09)
-    normal_fg = Color(0.79, 0.82, 0.85)
-    atm_bg    = Color(0.18, 0.16, 0.0)
-    atm_fg    = Color(1.0, 0.84, 0.0)
-
     try:
-        format_cell_range(ws, "A1:G1",
-            CellFormat(backgroundColor=title_bg,
-                       textFormat=TextFormat(bold=True, foregroundColor=title_fg, fontSize=13)))
-        format_cell_range(ws, "A2:G2",
-            CellFormat(backgroundColor=colhdr_bg,
-                       textFormat=TextFormat(bold=True, foregroundColor=colhdr_fg)))
-
+        dark  = Color(0.05, 0.07, 0.09)
+        purp  = Color(0.65, 0.49, 0.98)
+        hdr   = Color(0.13, 0.15, 0.18)
+        blue  = Color(0.35, 0.65, 1.0)
+        lgray = Color(0.79, 0.82, 0.85)
+        atmbg = Color(0.18, 0.16, 0.0)
+        atmfg = Color(1.0,  0.84, 0.0)
+        format_cell_range(ws, "A1:G1", CellFormat(backgroundColor=dark, textFormat=TextFormat(bold=True, foregroundColor=purp, fontSize=13)))
+        format_cell_range(ws, "A2:G2", CellFormat(backgroundColor=hdr,  textFormat=TextFormat(bold=True, foregroundColor=blue)))
         for i, r in enumerate(rows):
-            row_num = 3 + i
+            rn = 3 + i
             if r["is_atm"]:
-                format_cell_range(ws, f"A{row_num}:G{row_num}",
-                    CellFormat(backgroundColor=atm_bg,
-                               textFormat=TextFormat(bold=True, foregroundColor=atm_fg)))
+                format_cell_range(ws, f"A{rn}:G{rn}", CellFormat(backgroundColor=atmbg, textFormat=TextFormat(bold=True, foregroundColor=atmfg)))
             else:
-                format_cell_range(ws, f"A{row_num}:G{row_num}",
-                    CellFormat(backgroundColor=dark_bg,
-                               textFormat=TextFormat(foregroundColor=normal_fg)))
-
+                format_cell_range(ws, f"A{rn}:G{rn}", CellFormat(backgroundColor=dark,  textFormat=TextFormat(foregroundColor=lgray)))
         set_frozen(ws, rows=2)
     except Exception as e:
-        print(f"   ⚠️  Vega Table formatting skipped due to error: {e}")
-
-def write_prev_oi(sheet, rows):
-    """Save current OI as 'previous' for next run's delta calc"""
-    ws = get_or_create_tab(sheet, "Prev OI")
-    data = [["strike", "ce_oi", "pe_oi"]]
-    for r in rows:
-        data.append([r["strike"], r["ce_oi"], r["pe_oi"]])
-    ws.clear()
-    ws.update(values=data, range_name="A1")
+        print(f"   ⚠️  Vega formatting skipped: {e}")
 
 def read_prev_oi(sheet):
-    """Read previous OI from hidden tab"""
     try:
         ws = sheet.worksheet("Prev OI")
         records = ws.get_all_records()
@@ -407,107 +255,75 @@ def read_prev_oi(sheet):
     except Exception:
         return {}
 
-def write_history(sheet, spot, atm, rows, pcr, signal):
-    """Append one row per run to History tab"""
-    ws = get_or_create_tab(sheet, "History", rows=2000, cols=15)
-    now = now_ist().strftime("%d-%b %H:%M")
+def write_prev_oi(sheet, rows):
+    ws = get_or_create_tab(sheet, "Prev OI")
+    data = [["strike", "ce_oi", "pe_oi"]] + [[r["strike"], r["ce_oi"], r["pe_oi"]] for r in rows]
+    ws.clear()
+    ws.update(values=data, range_name="A1")
 
-    # get ATM row
+def write_history(sheet, spot, atm, rows, pcr, signal):
+    ws = get_or_create_tab(sheet, "History", rows=2000, cols=13)
+    now = now_ist().strftime("%d-%b %H:%M")
     atm_row = next((r for r in rows if r["is_atm"]), None)
     if not atm_row:
         return
-
     existing = ws.get_all_values()
-    # A brand-new worksheet can return [[]] (one empty row) rather than
-    # [], so check the first cell safely instead of indexing blindly.
     has_header = bool(existing) and bool(existing[0]) and existing[0][0] == "Time"
     if not has_header:
-        ws.update(values=[["Time", "Spot", "ATM", "CE OI", "CE ΔOI", "PE OI", "PE ΔOI",
-                            "CE Vega", "PE Vega", "CE IV%", "PE IV%", "PCR", "Signal"]],
-                   range_name="A1")
-
-    ws.append_row([
-        now, spot, atm,
-        atm_row["ce_oi"], 0,  # delta filled in next improvement
-        atm_row["pe_oi"], 0,
-        atm_row["ce_vega"], atm_row["pe_vega"],
-        atm_row["ce_iv"], atm_row["pe_iv"],
-        pcr, signal,
-    ])
+        ws.update(values=[["Time","Spot","ATM","CE OI","CE ΔOI","PE OI","PE ΔOI",
+                            "CE Vega","PE Vega","CE IV%","PE IV%","PCR","Signal"]], range_name="A1")
+    ws.append_row([now, spot, atm,
+                   atm_row["ce_oi"], 0, atm_row["pe_oi"], 0,
+                   atm_row["ce_vega"], atm_row["pe_vega"],
+                   atm_row["ce_iv"], atm_row["pe_iv"], pcr, signal])
     print("✅ History updated")
 
 def write_atm_oi_log(sheet, rows, atm, prev_oi):
-    """Appends ONE new row per run to a simple 3-column log:
-    time | ATM CE OI change | ATM PE OI change — matching the
-    user's reference screenshot exactly. This function only ever
-    APPENDS — it never edits or overwrites past rows, so any
-    manual edits the user makes to old rows are always preserved."""
     ws = get_or_create_tab(sheet, "ATM OI Log", rows=2000, cols=4)
     now_str = now_ist().strftime("%H:%M")
-
     atm_row = next((r for r in rows if r["is_atm"]), None)
     if not atm_row:
-        print("   ⚠️  ATM OI Log skipped — no ATM strike found this run")
         return
-
     prev_ce = prev_oi.get(atm_row["strike"], {}).get("ce_oi", atm_row["ce_oi"])
     prev_pe = prev_oi.get(atm_row["strike"], {}).get("pe_oi", atm_row["pe_oi"])
     ce_delta = atm_row["ce_oi"] - prev_ce
     pe_delta = atm_row["pe_oi"] - prev_pe
-
     existing = ws.get_all_values()
     has_header = bool(existing) and bool(existing[0]) and existing[0][0] == "time"
     if not has_header:
-        ws.update(values=[["time", "ATM CE OI change", "ATM PE OI change"]],
-                   range_name="A1")
+        ws.update(values=[["time", "ATM CE OI change", "ATM PE OI change"]], range_name="A1")
         try:
-            format_cell_range(ws, "A1:C1",
-                CellFormat(backgroundColor=Color(0.13, 0.15, 0.18),
-                           textFormat=TextFormat(bold=True, foregroundColor=Color(0.35, 0.65, 1.0))))
+            format_cell_range(ws, "A1:C1", CellFormat(
+                backgroundColor=Color(0.13, 0.15, 0.18),
+                textFormat=TextFormat(bold=True, foregroundColor=Color(0.35, 0.65, 1.0))))
             set_frozen(ws, rows=1)
-        except Exception as e:
-            print(f"   ⚠️  ATM OI Log formatting skipped: {e}")
-
+        except Exception:
+            pass
     ws.append_row([now_str, ce_delta, pe_delta])
-    print(f"✅ ATM OI Log updated — {now_str}: CE Δ{ce_delta:+}, PE Δ{pe_delta:+}")
+    print(f"✅ ATM OI Log — {now_str}: CE Δ{ce_delta:+}, PE Δ{pe_delta:+}")
 
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
-    global DHAN_ACCESS_TOKEN
     print(f"🚀 Starting OI fetch — {now_ist().strftime('%H:%M:%S')}")
 
-    # 0. Get a fresh access token — via TOTP if configured, else manual fallback
-    DHAN_ACCESS_TOKEN = get_access_token()
+    if not DHAN_ACCESS_TOKEN:
+        raise RuntimeError("DHAN_ACCESS_TOKEN is empty — update it in GitHub Secrets")
 
-    # 1. Get the nearest valid expiry directly from Dhan (no manual updating needed)
-    expiry = fetch_nearest_expiry()
-
-    # 2. Fetch option chain (this response also contains the spot/LTP)
-    raw  = fetch_options_chain(expiry)
-    spot = fetch_spot_price(raw)
+    expiry  = fetch_nearest_expiry()
+    raw     = fetch_options_chain(expiry)
+    spot    = fetch_spot_price(raw)
     print(f"   Spot: {spot}")
 
-    if spot == 0:
-        print("⚠️  Spot price came back as 0 — check Dhan credentials")
-
-    # 3. Process
     rows, atm = process_chain(raw, spot)
+    sheet     = get_sheet_client()
+    prev_oi   = read_prev_oi(sheet)
 
-    # 4. Connect to Sheets
-    sheet = get_sheet_client()
-
-    # 5. Read previous OI for delta
-    prev_oi = read_prev_oi(sheet)
-
-    # 6. Write all tabs
     pcr, signal = write_live_oi(sheet, rows, spot, atm, prev_oi, expiry)
     write_vega_table(sheet, rows, spot, atm)
     write_history(sheet, spot, atm, rows, pcr, signal)
     write_atm_oi_log(sheet, rows, atm, prev_oi)
-
-    # 6. Save current OI as prev for next run
     write_prev_oi(sheet, rows)
 
     print("✅ All done!")
