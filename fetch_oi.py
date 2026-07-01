@@ -1,8 +1,6 @@
 """
 Options OI + Vega Dashboard - GitHub Actions Script
 Data source: NSE India (free, no subscription needed)
-Uses NseIndiaApi with server=True (httpx/HTTP2) to bypass NSE's
-server-environment blocking that affects plain requests calls.
 """
 
 import os
@@ -21,28 +19,19 @@ IST = timedelta(hours=5, minutes=30)
 def now_ist():
     return datetime.utcnow() + IST
 
-# ─────────────────────────────────────────────
-#  CREDENTIALS — only Google ones needed now
-# ─────────────────────────────────────────────
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 
-CONFIG = {
-    "STRIKES": 10,   # strikes above and below ATM to show
-}
+CONFIG = {"STRIKES": 10}
 
 # ─────────────────────────────────────────────
-#  NSE DATA FETCH
+#  NSE FETCH
 # ─────────────────────────────────────────────
 def fetch_nse_option_chain():
-    """Uses NseIndiaApi with server=True (httpx + HTTP/2) which is
-    specifically designed to work in server/cloud environments where
-    NSE blocks plain requests calls."""
     DIR = Path("/tmp/nse_cache")
     DIR.mkdir(exist_ok=True)
-
     with NSE(download_folder=DIR, server=True) as nse:
-        raw = nse.optionChain("nifty")   # nearest expiry auto-resolved
+        raw = nse.optionChain("nifty")
     return raw
 
 def process_nse_chain(raw):
@@ -53,13 +42,23 @@ def process_nse_chain(raw):
     if not expiries:
         raise RuntimeError("No expiry dates in NSE response")
 
-    # Pick nearest Tuesday (NIFTY weekly expiry day since Sep 2025)
+    # Log first few expiries and a sample record so we can see exact formats
+    print(f"   📋 Available expiries: {expiries[:4]}")
+    if all_data:
+        sample = all_data[0]
+        print(f"   📋 Sample record expiryDate field: '{sample.get('expiryDate')}'")
+        print(f"   📋 Sample record keys: {list(sample.keys())}")
+
+    # Pick nearest Tuesday expiry from expiryDates list
     nearest_expiry = None
     for exp in expiries:
-        exp_date = datetime.strptime(exp, "%d-%b-%Y")
-        if exp_date.weekday() == 1:   # Tuesday = 1
-            nearest_expiry = exp
-            break
+        try:
+            exp_date = datetime.strptime(exp, "%d-%b-%Y")
+            if exp_date.weekday() == 1:   # Tuesday
+                nearest_expiry = exp
+                break
+        except Exception:
+            pass
     if not nearest_expiry:
         nearest_expiry = expiries[0]
     print(f"   📅 Using expiry: {nearest_expiry}")
@@ -68,9 +67,28 @@ def process_nse_chain(raw):
     atm  = round(spot / 50) * 50
     print(f"   Spot: {spot}  ATM: {atm}")
 
+    # Find what format the expiryDate field uses INSIDE data records
+    # by checking the first record — could differ from expiryDates list format
+    record_expiry_format = None
+    if all_data:
+        sample_exp = all_data[0].get("expiryDate", "")
+        # Try to detect format
+        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%B-%Y"):
+            try:
+                parsed = datetime.strptime(sample_exp, fmt)
+                # Now format nearest_expiry in the same way for comparison
+                nearest_dt = datetime.strptime(nearest_expiry, "%d-%b-%Y")
+                record_expiry_format = nearest_dt.strftime(fmt)
+                print(f"   📋 Record expiryDate format detected: '{fmt}' → matching value: '{record_expiry_format}'")
+                break
+            except Exception:
+                continue
+
+    match_expiry = record_expiry_format or nearest_expiry
+
     rows = []
     for rec in all_data:
-        if rec.get("expiryDate") != nearest_expiry:
+        if rec.get("expiryDate") != match_expiry:
             continue
         strike = int(rec.get("strikePrice", 0))
         ce     = rec.get("CE", {}) or {}
@@ -87,6 +105,31 @@ def process_nse_chain(raw):
             "pe_iv":   round(pe.get("impliedVolatility", 0) or 0, 2),
             "pe_vega": 0,
         })
+
+    print(f"   📊 Matched {len(rows)} strike rows for expiry '{match_expiry}'")
+
+    if not rows:
+        # Fallback: just use ALL records regardless of expiry
+        # This tells us if the expiry matching is the problem
+        print("   ⚠️  No rows matched — using ALL records as fallback to diagnose")
+        unique_expiries_in_data = list({r.get("expiryDate") for r in all_data})
+        print(f"   📋 Unique expiryDate values found in data: {unique_expiries_in_data[:6]}")
+        for rec in all_data[:21]:   # just take first 21 as a sample
+            strike = int(rec.get("strikePrice", 0))
+            ce     = rec.get("CE", {}) or {}
+            pe     = rec.get("PE", {}) or {}
+            rows.append({
+                "strike":  strike,
+                "is_atm":  (strike == atm),
+                "ce_oi":   ce.get("openInterest", 0) or 0,
+                "ce_doi":  ce.get("changeinOpenInterest", 0) or 0,
+                "ce_iv":   round(ce.get("impliedVolatility", 0) or 0, 2),
+                "ce_vega": 0,
+                "pe_oi":   pe.get("openInterest", 0) or 0,
+                "pe_doi":  pe.get("changeinOpenInterest", 0) or 0,
+                "pe_iv":   round(pe.get("impliedVolatility", 0) or 0, 2),
+                "pe_vega": 0,
+            })
 
     rows.sort(key=lambda x: x["strike"])
     n       = CONFIG["STRIKES"]
@@ -148,26 +191,20 @@ def write_live_oi(sheet, rows, spot, atm, expiry):
 
 def format_live_oi(ws, rows):
     try:
-        dark  = Color(0.05, 0.07, 0.09)
-        green = Color(0.0,  1.0,  0.53)
-        tgrn  = Color(0.10, 0.18, 0.10)
-        lgrn  = Color(0.49, 0.91, 0.53)
-        dgray = Color(0.09, 0.10, 0.13)
-        lgray = Color(0.79, 0.82, 0.85)
-        hdr   = Color(0.13, 0.15, 0.18)
-        blue  = Color(0.35, 0.65, 1.0)
-        atmbg = Color(0.18, 0.16, 0.0)
-        atmfg = Color(1.0,  0.84, 0.0)
+        dark  = Color(0.05, 0.07, 0.09); green = Color(0.0, 1.0, 0.53)
+        tgrn  = Color(0.10, 0.18, 0.10); lgrn  = Color(0.49, 0.91, 0.53)
+        dgray = Color(0.09, 0.10, 0.13); lgray = Color(0.79, 0.82, 0.85)
+        hdr   = Color(0.13, 0.15, 0.18); blue  = Color(0.35, 0.65, 1.0)
+        atmbg = Color(0.18, 0.16, 0.0);  atmfg = Color(1.0, 0.84, 0.0)
         format_cell_range(ws, "A1:J1", CellFormat(backgroundColor=dark,  textFormat=TextFormat(bold=True, foregroundColor=green, fontSize=13)))
         format_cell_range(ws, "A2:J2", CellFormat(backgroundColor=tgrn,  textFormat=TextFormat(bold=True, foregroundColor=lgrn,  fontSize=12)))
         format_cell_range(ws, "A3:J3", CellFormat(backgroundColor=dgray, textFormat=TextFormat(foregroundColor=lgray, fontSize=11)))
         format_cell_range(ws, "A5:J5", CellFormat(backgroundColor=hdr,   textFormat=TextFormat(bold=True, foregroundColor=blue,  fontSize=11)))
         for i, r in enumerate(rows):
-            rn = 6 + i
-            if r["is_atm"]:
-                format_cell_range(ws, f"A{rn}:J{rn}", CellFormat(backgroundColor=atmbg, textFormat=TextFormat(bold=True, foregroundColor=atmfg)))
-            else:
-                format_cell_range(ws, f"A{rn}:J{rn}", CellFormat(backgroundColor=dark,  textFormat=TextFormat(foregroundColor=lgray)))
+            rn  = 6 + i
+            fmt = CellFormat(backgroundColor=atmbg, textFormat=TextFormat(bold=True, foregroundColor=atmfg)) if r["is_atm"] else \
+                  CellFormat(backgroundColor=dark,  textFormat=TextFormat(foregroundColor=lgray))
+            format_cell_range(ws, f"A{rn}:J{rn}", fmt)
         set_frozen(ws, rows=5)
         print("   🎨 Formatting applied")
     except Exception as e:
@@ -188,13 +225,13 @@ def write_vega_table(sheet, rows, spot, atm):
     ws.update(values=header + data_rows, range_name="A1")
     print("✅ Vega Table updated")
     try:
-        dark  = Color(0.05, 0.07, 0.09); purp = Color(0.65, 0.49, 0.98)
-        hdr   = Color(0.13, 0.15, 0.18); blue = Color(0.35, 0.65, 1.0)
+        dark  = Color(0.05, 0.07, 0.09); purp  = Color(0.65, 0.49, 0.98)
+        hdr   = Color(0.13, 0.15, 0.18); blue  = Color(0.35, 0.65, 1.0)
         lgray = Color(0.79, 0.82, 0.85); atmbg = Color(0.18, 0.16, 0.0); atmfg = Color(1.0, 0.84, 0.0)
         format_cell_range(ws, "A1:G1", CellFormat(backgroundColor=dark, textFormat=TextFormat(bold=True, foregroundColor=purp, fontSize=13)))
         format_cell_range(ws, "A2:G2", CellFormat(backgroundColor=hdr,  textFormat=TextFormat(bold=True, foregroundColor=blue)))
         for i, r in enumerate(rows):
-            rn = 3 + i
+            rn  = 3 + i
             fmt = CellFormat(backgroundColor=atmbg, textFormat=TextFormat(bold=True, foregroundColor=atmfg)) if r["is_atm"] else \
                   CellFormat(backgroundColor=dark,  textFormat=TextFormat(foregroundColor=lgray))
             format_cell_range(ws, f"A{rn}:G{rn}", fmt)
@@ -247,7 +284,7 @@ def write_atm_oi_log(sheet, rows):
         except Exception:
             pass
     ws.append_row([now_str, atm_row["ce_doi"], atm_row["pe_doi"]])
-    print(f"✅ ATM OI Log — {now_str}: CE Δ{atm_row['ce_doi']:+}, PE Δ{atm_row['pe_doi']:+}")
+    print(f"✅ ATM OI Log — {now_str}")
 
 # ─────────────────────────────────────────────
 #  MAIN
