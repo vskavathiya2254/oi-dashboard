@@ -42,57 +42,67 @@ def process_nse_chain(raw):
     if not expiries:
         raise RuntimeError("No expiry dates in NSE response")
 
-    # Log first few expiries and a sample record so we can see exact formats
-    print(f"   📋 Available expiries: {expiries[:4]}")
-    if all_data:
-        sample = all_data[0]
-        print(f"   📋 Sample record expiryDate field: '{sample.get('expiryDate')}'")
-        print(f"   📋 Sample record keys: {list(sample.keys())}")
+    print(f"   📋 Expiries available: {expiries[:4]}")
+    print(f"   📋 Total records: {len(all_data)}")
 
-    # Pick nearest Tuesday expiry from expiryDates list
+    # Pick nearest Tuesday expiry from the top-level expiryDates list
     nearest_expiry = None
+    nearest_dt     = None
     for exp in expiries:
         try:
             exp_date = datetime.strptime(exp, "%d-%b-%Y")
             if exp_date.weekday() == 1:   # Tuesday
                 nearest_expiry = exp
+                nearest_dt     = exp_date
                 break
         except Exception:
             pass
     if not nearest_expiry:
         nearest_expiry = expiries[0]
+        nearest_dt     = datetime.strptime(nearest_expiry, "%d-%b-%Y")
     print(f"   📅 Using expiry: {nearest_expiry}")
 
     spot = float(records.get("underlyingValue", 0))
     atm  = round(spot / 50) * 50
     print(f"   Spot: {spot}  ATM: {atm}")
 
-    # Find what format the expiryDate field uses INSIDE data records
-    # by checking the first record — could differ from expiryDates list format
-    record_expiry_format = None
-    if all_data:
-        sample_exp = all_data[0].get("expiryDate", "")
-        # Try to detect format
-        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%B-%Y"):
-            try:
-                parsed = datetime.strptime(sample_exp, fmt)
-                # Now format nearest_expiry in the same way for comparison
-                nearest_dt = datetime.strptime(nearest_expiry, "%d-%b-%Y")
-                record_expiry_format = nearest_dt.strftime(fmt)
-                print(f"   📋 Record expiryDate format detected: '{fmt}' → matching value: '{record_expiry_format}'")
-                break
-            except Exception:
-                continue
-
-    match_expiry = record_expiry_format or nearest_expiry
-
+    # The actual structure from NseIndiaApi:
+    # each item in data[] has: strikePrice, expiryDates (list), CE (dict), PE (dict)
+    # We filter by checking if our target expiry is IN the item's expiryDates list,
+    # OR if the item has no expiryDates key, we try matching CE/PE data directly.
     rows = []
     for rec in all_data:
-        if rec.get("expiryDate") != match_expiry:
-            continue
         strike = int(rec.get("strikePrice", 0))
-        ce     = rec.get("CE", {}) or {}
-        pe     = rec.get("PE", {}) or {}
+        if strike == 0:
+            continue
+
+        # Check expiry — the record has an "expiryDates" list (note: plural)
+        rec_expiries = rec.get("expiryDates", [])
+        if rec_expiries:
+            # Filter: only include this strike if our target expiry is in its list
+            # Try matching both the string directly and by parsed date
+            match = False
+            for re in rec_expiries:
+                try:
+                    if re == nearest_expiry:
+                        match = True
+                        break
+                    # Try parsing in case format differs
+                    if datetime.strptime(re, "%d-%b-%Y").date() == nearest_dt.date():
+                        match = True
+                        break
+                except Exception:
+                    pass
+            if not match:
+                continue
+
+        ce = rec.get("CE", {}) or {}
+        pe = rec.get("PE", {}) or {}
+
+        # Skip rows where both CE and PE are empty dicts
+        if not ce and not pe:
+            continue
+
         rows.append({
             "strike":  strike,
             "is_atm":  (strike == atm),
@@ -106,18 +116,20 @@ def process_nse_chain(raw):
             "pe_vega": 0,
         })
 
-    print(f"   📊 Matched {len(rows)} strike rows for expiry '{match_expiry}'")
+    print(f"   📊 Parsed {len(rows)} strike rows")
 
+    # If still empty, just take all rows regardless of expiry
+    # (means our expiry filtering logic still has edge case)
     if not rows:
-        # Fallback: just use ALL records regardless of expiry
-        # This tells us if the expiry matching is the problem
-        print("   ⚠️  No rows matched — using ALL records as fallback to diagnose")
-        unique_expiries_in_data = list({r.get("expiryDate") for r in all_data})
-        print(f"   📋 Unique expiryDate values found in data: {unique_expiries_in_data[:6]}")
-        for rec in all_data[:21]:   # just take first 21 as a sample
+        print("   ⚠️  Still empty after filtering — taking all records without expiry filter")
+        for rec in all_data:
             strike = int(rec.get("strikePrice", 0))
-            ce     = rec.get("CE", {}) or {}
-            pe     = rec.get("PE", {}) or {}
+            if strike == 0:
+                continue
+            ce = rec.get("CE", {}) or {}
+            pe = rec.get("PE", {}) or {}
+            if not ce and not pe:
+                continue
             rows.append({
                 "strike":  strike,
                 "is_atm":  (strike == atm),
@@ -130,6 +142,7 @@ def process_nse_chain(raw):
                 "pe_iv":   round(pe.get("impliedVolatility", 0) or 0, 2),
                 "pe_vega": 0,
             })
+        print(f"   📊 Fallback parsed {len(rows)} rows")
 
     rows.sort(key=lambda x: x["strike"])
     n       = CONFIG["STRIKES"]
